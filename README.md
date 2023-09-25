@@ -11,20 +11,10 @@
 [contributor-shield]:https://img.shields.io/github/contributors/sailpoint-oss/colab-rules?label=Contributors
 [contributor-url]:https://github.com/sailpoint-oss/colab-rules/graphs/contributors
 
-<!-- PROJECT LOGO -->
-<br />
-<div align="center">
-<img src="https://avatars.githubusercontent.com/u/63106368?s=200&v=4" alt="Logo" width="80" height="80">
+# Developer Community CoLab - Rules
+[Explore all Rules in the CoLab »](https://developer.sailpoint.com/discuss/c/colab/colab-rules/71)
 
-  <h3 align="center">Developer Community CoLab - Rules</h3>
-
-  <p align="center">
-    <a href="https://developer.sailpoint.com/discuss/c/colab/colab-rules/71"><strong>Explore Rules in the CoLab »</strong></a>
-  </p>
-  <p align="center">
-    <a href="https://developer.sailpoint.com/discuss/t/about-the-sailpoint-developer-community-colab/11230"><strong>New to the CoLab? Click here »</strong></a>
-  </p>
-</div>
+[New to the CoLab? Click here »](https://developer.sailpoint.com/discuss/t/about-the-sailpoint-developer-community-colab/11230)
 
 <!-- CONTRIBUTING -->
 ## Contributing
