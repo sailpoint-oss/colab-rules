@@ -4,7 +4,7 @@
 [![Issues][issues-shield]][issues-url]
 [![Contributor Shield][contributor-shield]][contributor-url]
 
-[discourse-shield]:https://img.shields.io/discourse/topics?label=Discuss%20This%20Tool&server=https%3A%2F%2Fdeveloper.sailpoint.com%2Fdiscuss%2Fc%2Fcolab%2Fcolab-transforms%2F70
+[discourse-shield]:https://img.shields.io/discourse/topics?server=https%3A%2F%2Fdeveloper.sailpoint.com%2Fdiscuss&link=https%3A%2F%2Fdeveloper.sailpoint.com%2Fdiscuss%2Fc%2Fcolab%2Fcolab-rules%2F71
 [discourse-url]:https://developer.sailpoint.com/discuss/c/colab/colab-rules/71
 [issues-shield]:https://img.shields.io/github/issues/sailpoint-oss/colab-rules?label=Issues
 [issues-url]:https://github.com/sailpoint-oss/colab-rules/issues
