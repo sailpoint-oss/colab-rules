@@ -183,6 +183,7 @@
     }
 
     public boolean isUnique(String username) throws GeneralException {
+        //Assumes your schema Account Name/Display name is sAMAccountNAme
         return !idn.accountExistsByDisplayName(application.getName(), username);
     }
 
