@@ -5,14 +5,14 @@
 [![Contributor Shield][contributor-shield]][contributor-url]
 
 [discourse-shield]:https://img.shields.io/discourse/topics?server=https%3A%2F%2Fdeveloper.sailpoint.com%2Fdiscuss&link=https%3A%2F%2Fdeveloper.sailpoint.com%2Fdiscuss%2Fc%2Fcolab%2Fcolab-rules%2F71
-[discourse-url]:https://developer.sailpoint.com/discuss/c/colab/colab-rules/71
+[discourse-url]:https://developer.sailpoint.com/discuss/tags/c/colab/colab-community-tools/98/reporting
 [issues-shield]:https://img.shields.io/github/issues/sailpoint-oss/colab-rules?label=Issues
 [issues-url]:https://github.com/sailpoint-oss/colab-rules/issues
 [contributor-shield]:https://img.shields.io/github/contributors/sailpoint-oss/colab-rules?label=Contributors
 [contributor-url]:https://github.com/sailpoint-oss/colab-rules/graphs/contributors
 
 # Developer Community CoLab - Rules
-[Explore all Rules in the CoLab »](https://developer.sailpoint.com/discuss/c/colab/colab-rules/71)
+[Explore all Reports in the CoLab »](https://developer.sailpoint.com/discuss/tags/c/colab/colab-community-tools/98/reporting)
 
 [New to the CoLab? Click here »](https://developer.sailpoint.com/discuss/t/about-the-sailpoint-developer-community-colab/11230)
 
@@ -26,9 +26,10 @@ Don't forget to give the project a star! Thanks again!
 
 1. Fork the Project
 2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+3. Add one or more new folders for your reports
+4. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+5. Push to the Branch (`git push origin feature/AmazingFeature`)
+6. Open a Pull Request
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
