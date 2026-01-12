@@ -1,0 +1,1297 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE Rule PUBLIC "sailpoint.dtd" "sailpoint.dtd">
+<Rule language="beanshell" name="ISC Sample BeforeProvisioning Rule" type="BeforeProvisioning">
+  <Description>Before Provisioning Rule which changes disables and enables to a modify.</Description>
+  <Source>
+  	<![CDATA[
+import sailpoint.object.Application;
+import sailpoint.object.Attributes;
+import sailpoint.object.Identity;
+import sailpoint.object.ManagedAttribute.Type;
+import sailpoint.object.ProvisioningPlan;
+import sailpoint.object.ProvisioningPlan.AccountRequest;
+import sailpoint.object.ProvisioningPlan.AttributeRequest;
+import sailpoint.tools.GeneralException;
+import sailpoint.tools.Util;
+
+import java.text.SimpleDateFormat;
+import sailpoint.rule.Account;
+import sailpoint.rule.ManagedAttributeDetails;
+import sailpoint.server.IdnRuleUtil;
+
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.Map;
+import java.util.Random;
+
+
+import java.util.HashMap;
+
+/*
+	 * This example rule is provided as is with no support or warranty; use at your own risk.
+	 * Last Updated: October 30, 2024
+	 */
+	
+	/*
+	 * Main Application Method. This will go through the passed in event configurations. 
+	 * If any event trigger/operation matches, it will apply the action for that configuration
+	 * 
+	 * The Before Provisioning Rule configurations allows for the generic BeforeProvisioningRule to process common events based on standard best practices. 
+	 * The configuration itself is a list of JSON Maps that include 2 basic concepts
+	 * 		Trigger: This configuration determines if this event should be applied based on
+	 * 			Operation of the account request
+	 * 			Identity Attribute values for the user being modified
+	 * 			Attribute updates in the account request
+	 * 			Entitlement updates in the account request
+	 * 			Entitlement Name updates in the account request
+	 *			Entitlement Cardinality Update Triggers: This checks if the account request contains 
+	 *				updates on the entitlement to either add when previously empty or remove the last entitlement
+	 *			Current Account Status Trigger: This checks the current status of the account
+	 * 		Action: This configuration determines what to do if this event should be applied. Available options are
+	 * 			Move AD Account: Adds AC_NewParent to the specified OU
+	 * 			Change Operation: changes the AccountRequest Operation to the specified operation
+	 * 			Remove Entitlements: removes all entitlements based on the account in ISC
+	 * 			Remove Sticky Entitlements: removes all entitlements based on the account in ISC; used to remove those granted through entitlement request
+	 * 			Remove AD Entitlements: sets the memberOf attribute to a list containing the one group
+	 * 			Scramble Password: sets the specified attribute to a string of characters
+	 * 			Update Attribute: Adds the specified attribute with the specified value
+	 * 			Add Argument: Adds the specified argument with the specified value
+ 	 * 			Add Argument If Not Null: Adds the specified argument with the specified value. If the value is null, it ignores.
+ 	 *			EntitlementMetaData: Add the specified Argument and correspoing ManagedAttributeDetails in the account Request
+ 	 *			EntitlementMetaDataDuplicate: Add the specified Argument and correspoing ManagedAttributeDetails in the account Request if duplicate
+ 	 *			EntitlementMetaDataExisting: Add the specified Argument and correspoing ManagedAttributeDetails in the existing account entitlements
+ 	 *			EntitlementMetaDataExistingDuplicate: Add the specified Argument and ciorrespoing ManagedAttributeDetails in the existing account entitlements if duplicate
+	 * 			Throw Error: Throws an error specified in the value attribute or "Unspecified Exception"
+	 * 			Stop Processing: Stops processing the BeforeProvisioningRule and proceeds to provisioning.
+	 */
+public void applyEventConfigurations(ProvisioningPlan plan, List events) throws GeneralException{
+		if(events == null) {
+			log.info("Events are null");
+			return;
+		}
+		if(plan == null) {
+			log.error("Plan is null");
+			return;
+		}
+		List accountRequests = plan.getAccountRequests();
+		Identity identity = plan.getIdentity();
+		for(AccountRequest accountRequest: accountRequests) {
+			for(Map event: events) {
+				// Check if this request matches the event configuration
+				log.debug("Check AccountRequest " + accountRequest + " matches event configuration: " + event);
+				if(!isAccountRequestMatch(identity, accountRequest, event)) {
+					log.info("Match NOT Found");
+					continue;
+				}
+				
+				// Found a match. need to apply the configurations associated
+				log.info("Match Found ... apply configurations");
+				List actionConfigs = (List) event.get("eventActions");
+				if(actionConfigs == null || actionConfigs.isEmpty()) {
+					log.error("No actions for event");
+					continue;
+				}
+				for(Map actionConfig: actionConfigs) {
+					/*
+					 * Each action should have
+					 * 	Action: What to do
+					 *  Attribute: Specific to the action
+					 *  Value: Specific to the action
+					 */
+					String action = (String) actionConfig.get("Action");
+					if(action == null) {
+						log.error("Action Config does not have Action set");
+						continue;
+					}
+					String attribute = (String) actionConfig.get("Attribute");
+					Object value = (String) actionConfig.get("Value");
+					String attrOp = (String) actionConfig.get("Operation");
+					
+					switch(action) {
+					case "ADMoveAccount":moveADAccount(identity, accountRequest, value);break;
+					case "ChangeOperation":changeOperation(accountRequest, value);break;
+					case "RemoveEntitlements":removeEntitlements(identity, accountRequest, attribute);break;
+					case "RemoveStickyEntitlements":removeStickyEntitlements(identity, accountRequest, attribute);break;
+					case "RemoveADEntitlements":removeADEntitlements(identity, accountRequest, value);break;
+					case "ScramblePassword":scramblePassword(accountRequest, attribute, value);break;
+					case "UpdateAttribute":updateAttribute(identity, accountRequest, attribute, value);break;
+					case "AddArgument":addArgument(identity, accountRequest, attribute, value);break;
+					case "AddArgumentIfNotNull":addArgument(identity, accountRequest, attribute, value, true);break;
+					case "EntitlementMetaData":addEntMetaDataArgument(accountRequest, attribute, value, attrOp);break;
+					case "EntitlementMetaDataExisting":addExistingEntMetaDataArgument(accountRequest, attribute, value);break;
+					case "EntitlementMetaDataExistingDuplicate":addExistingEntMetaDataArgumentDuplicate(accountRequest, attribute, value);break;
+					case "EntitlementMetaDataDuplicate":addEntMetaDataArgumentDuplicate(accountRequest, attribute, value, attrOp);break;
+					case "ThrowError":throwError(identity, accountRequest, attribute, value);break;
+					case "StopProcessing":return;
+					default: log.error("Invalid Action: " + action);
+					}
+				}
+			}
+		}
+	}
+	
+		/*
+	 * Helper Action Methods 
+	 */
+	public void moveADAccount(Identity identity, AccountRequest accountRequest, Object value) {
+		log.debug("Enter MoveADAccount: " + value);
+		if(accountRequest == null) {
+			log.error("MoveADAccount: Invalid Arguments: accountRequest is null");
+			return;
+		}
+		if(value instanceof String) {
+			log.debug("MoveADAccount: value is a string, send through replace");
+			String newOU = replaceIdentityValue(identity, accountRequest, (String) value);
+			log.info("MoveADAccount: replaced new value: " + newOU);
+			String currentNativeIdentity = accountRequest.getNativeIdentity();
+			if(currentNativeIdentity == null) {
+				log.error("moveADAccount: Invalid State: Current Native Identity is null");
+				return;
+			}
+			if(newOU == null || "".equals(newOU)) {
+				log.error("moveADAccount: Invalid Arguments: newOU is null");
+				return;
+			}
+			int indexOfCurrentOU = currentNativeIdentity.indexOf(newOU);
+			if(indexOfCurrentOU > 0 && !currentNativeIdentity.substring(0, indexOfCurrentOU).contains("OU=")) {
+				log.info("moveADAccount: Account already lives in OU");
+				return;
+			}
+			// USEFUL FEATURES TO ADD: Uniqueness checks and serialization
+			accountRequest.add(new AttributeRequest("AC_NewParent", ProvisioningPlan.Operation.Set, newOU));
+		}
+		else{
+			log.error("MoveADAccount: value is not a string or is null: " + value);
+		}
+		log.debug("Exit MoveADAccount");
+	}
+	public void changeOperation(AccountRequest accountRequest, Object value) {
+		log.debug("Enter changeOperation: " + value);
+		AccountRequest.Operation newOp = null;
+		try {
+			newOp = AccountRequest.Operation.valueOf((String) value);
+		}
+		catch(IllegalArgumentException e) {
+			log.error("ChangeOperation: Invalid Operation: " + value);
+		}
+		if(newOp != null) {
+			log.info("ChangeOperation: update Operation: " + newOp);
+			accountRequest.setOperation(newOp);
+		}
+		log.debug("Exit changeOperation");
+	}
+	public void removeEntitlements(Identity identity, AccountRequest accountRequest, String attribute) {
+		log.debug("Enter RemoveEntitlements: " + attribute);
+		if(accountRequest == null) {
+			log.error("RemoveEntitlements: Invalid Arguments: accountRequest is null");
+			return;
+		}
+		if(attribute == null) {
+			log.error("RemoveEntitlements: Invalid Arguments: attribute is null");
+			return;
+		}
+		if(identity == null) {
+			log.error("RemoveEntitlements: Invalid Arguments: Identity is null");
+			return;
+		}
+
+		Account account = getAccount(identity, accountRequest);
+		if(null != idn.getRawAccountAttribute(account, attribute)) {
+			List ents = asList(idn.getRawAccountAttribute(account, attribute));
+			if(ents != null) {
+				accountRequest.add(new AttributeRequest(attribute, ProvisioningPlan.Operation.Remove, ents));
+			}
+		}
+		log.debug("Exit RemoveEntitlements");
+	}
+	public void removeStickyEntitlements(Identity identity, AccountRequest accountRequest, String attribute) {
+		log.debug("Enter removeStickyEntitlements: " + attribute);
+
+		//...null checks...
+		Account account = getAccount(identity, accountRequest);
+		if(null != idn.getRawAccountAttribute(account, attribute)) {
+			List ents = (List)idn.getRawAccountAttribute(account, attribute);
+			if(ents != null) {
+				AttributeRequest attrRequest = new AttributeRequest(attribute, ProvisioningPlan.Operation.Remove, ents);
+				attrRequest.put("assignment", true);
+				accountRequest.add(attrRequest);
+			}
+		}
+		log.debug("Exit removeStickyEntitlements");
+	}
+	public void removeADEntitlements(Identity identity, AccountRequest accountRequest, Object value) {
+		log.debug("Enter removeADEntitlements: " + value);
+		if(accountRequest == null) {
+			log.error("removeADEntitlements: Invalid Arguments: accountRequest is null");
+			return;
+		}
+		String adDomainUsers = null;
+		if(value == null) {
+			log.error("removeADEntitlements: Invalid Arguments: value is null");
+			return;
+		}
+		else if(value instanceof String) {
+			if(((String) value).contains("DC")) {
+				adDomainUsers = (String)value;
+			}
+		}
+		if(adDomainUsers == null) {
+			log.error("removeADEntitlements: Invalid Arguments: value is not valid");
+			return;
+		}
+		if(identity == null) {
+			log.error("removeADEntitlements: Invalid Arguments: Identity is null");
+			return;
+		}
+		List groupList = new ArrayList();
+		groupList.add(adDomainUsers);
+		accountRequest.add(new AttributeRequest("memberOf", ProvisioningPlan.Operation.Set, groupList));
+		log.debug("Exit RemoveEntitlements");
+	}
+	public void scramblePassword(AccountRequest accountRequest, String attribute, Object value) {
+		log.debug("Enter ScramblePassword");
+		if(accountRequest == null) {
+			log.error("UpdateAttribute: Invalid Arguments: accountRequest is null");
+			return;
+		}
+		if(attribute == null) {
+			log.error("UpdateAttribute: Invalid Arguments: attribute is null");
+			return;
+		}
+		String newPassword = "";
+		String charset = "ABNCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890!@#$%^&*()_+-={}[]:;<>?,./";
+		int count;
+		int index;
+		int len;
+		Random rnd = new Random();
+		len = charset.length();
+		for (count = 0; count < 18; count++) {
+			index = rnd.nextInt(len);
+			newPassword += charset.charAt(index);
+		}
+		accountRequest.add(new AttributeRequest(attribute, ProvisioningPlan.Operation.Set, newPassword));
+		// USEFUL FEATURES TO ADD: Update to use PasswordGenerator
+		log.debug("Exit ScramblePassword");
+	}
+	public void updateAttribute(Identity identity, AccountRequest accountRequest, String attribute, Object value) {
+		log.debug("Enter UpdateAttribute: " + value);
+		if(accountRequest == null) {
+			log.error("UpdateAttribute: Invalid Arguments: accountRequest is null");
+			return;
+		}
+		if(attribute == null) {
+			log.error("UpdateAttribute: Invalid Arguments: attribute is null");
+			return;
+		}
+		Object newValue = null;
+		if(value instanceof String) {
+			log.debug("UpdateAttribute: value is a string, send through replace");
+			newValue = replaceIdentityValue(identity, accountRequest, (String) value);
+			log.info("UpdateAttribute: replaced new value: " + newValue );
+		}
+		else{
+			log.debug("UpdateAttribute: value is not a string or is null: " + value);
+			newValue = value;
+		}
+		accountRequest.add(new AttributeRequest(attribute, ProvisioningPlan.Operation.Set, newValue));
+		log.debug("Exit UpdateAttribute");
+	}
+	public void addArgument(Identity identity, AccountRequest accountRequest, String attribute, Object value) {
+		log.debug("Enter AddArgument without ignoreIfNotNull ... calling other method with a false");
+		addArgument(identity, accountRequest, attribute, value, false);
+	}
+	public void addArgument(Identity identity, AccountRequest accountRequest, String attribute, Object value, boolean ignoreIfNotNull) {
+		log.debug("Enter AddArgument: " + value);
+		log.debug("Ignore If Not Null: " + ignoreIfNotNull);
+		if(accountRequest == null) {
+			log.error("AddArgument: Invalid Arguments: accountRequest is null");
+			return;
+		}
+		if(attribute == null) {
+			log.error("AddArgument: Invalid Arguments: attribute is null");
+			return;
+		}
+		Object newValue = null;
+		List lsExistingEnt = new ArrayList();
+		if(value instanceof String) {
+			
+		newValue = replaceIdentityValue(identity, accountRequest, (String) value);
+		String objString = String.valueOf(newValue);
+			if (objString.startsWith("[")) {
+				String strippedString = objString.substring(1, objString.length() - 1);
+				List stringList = Util.filterNulls(Util.csvToList(strippedString));
+				if (stringList.size() == 1) {
+					newValue = (String) stringList.get(0);
+					log.debug("AddArgument: Single Value::" + newValue);
+				} else {
+					newValue =lsExistingEnt;
+				}
+			}
+			log.info("AddArgument: replaced new value: " + newValue);
+		}
+		else{
+			log.debug("AddArgument: value is not a string or is null: " + value);
+			newValue = value;
+		}
+		Attributes args = accountRequest.getArguments();
+		if(args == null) {
+			args = new Attributes();
+			accountRequest.setArguments(args);
+		}
+		if((newValue == null || newValue.toString().isEmpty()) && ignoreIfNotNull) {
+			log.debug("AddArgument: value is null and ignoreIfNotNull is true ... ignoring");
+		}
+		else {		
+			args.put(attribute, newValue);
+			log.debug("AddArgument: setting value");
+		}
+		log.debug("Exit AddArgument");
+	}
+	
+	
+	public void addMetaDataArgument(AccountRequest accountRequest, String attribute, Object value) throws GeneralException {
+		log.debug("Enter addMetaDataArgument: " + value);
+		if (accountRequest == null) {
+			log.error("addMetaDataArgument: Invalid Arguments: accountRequest is null");
+			return;
+		}
+		if (attribute == null) {
+			log.error("addMetaDataArgument: Invalid Arguments: attribute is null");
+			return;
+		}
+		Object newValue = value;
+		Attributes args = accountRequest.getArguments();
+		if (args == null) {
+			args = new Attributes();
+			accountRequest.setArguments(args);
+		}
+		if ((newValue == null || newValue.toString().isEmpty())) {
+			log.debug("addMetaDataArgument: value is null and ignoreIfNotNull is true ... ignoring");
+		} else {
+			
+			args.put(attribute, newValue);
+			log.debug("addMetaDataArgument: setting value");
+		}
+		log.debug("Exit addMetaDataArgument");
+	}
+
+	public void addEntMetaDataArgument(AccountRequest accountRequest, String attribute,
+			Object value, String attrOp) throws GeneralException {
+		log.debug("Starting addEntMetaDataArgument::");
+		String strEntAttr = (String) value;
+		log.debug("addEntMetaDataArgument:: Attr:" + strEntAttr);
+		Map mapFinalMgd = new HashMap();
+		List entAttrReqs = accountRequest.getAttributeRequests(strEntAttr);
+		if (entAttrReqs != null) {
+			for (AttributeRequest entAttrReq : entAttrReqs) {
+				boolean doCompare = false;
+				if ("Add".equals(attrOp) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Add) {
+					log.debug("Looking at an Add and operation in action is Add");
+					doCompare = true;
+				} else if ("Remove".equals(attrOp) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Remove) {
+					log.debug("Looking at an Remove and operation in action is Remove");
+					doCompare = true;
+				} else if ("Set".equals(attrOp) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Set) {
+					log.debug("Looking at an Set and operation in action is Set");
+					doCompare = true;
+				}
+					List valuesUpdated = asList(entAttrReq.getValue());
+					if (valuesUpdated != null) {
+						for (String entvalue : valuesUpdated) {
+							ManagedAttributeDetails entDetails = idn.getManagedAttributeDetails(application.getId(), strEntAttr, entvalue, Type.Entitlement);
+							Map entAttrs = entDetails != null ? entDetails.getAttributes() : null;
+						if (doCompare) {
+							mapFinalMgd.put(entvalue, entAttrs);
+						} else {
+							mapFinalMgd.put(entvalue, entAttrs);
+						}
+					}	
+			}
+		}
+		log.debug("addEntMetaDataArgument:: Entilement attribute:"+mapFinalMgd);	
+		addMetaDataArgument(accountRequest, attribute, mapFinalMgd);
+		log.debug("Exit addEntMetaDataArgument::");
+	}
+}
+
+public void addExistingEntMetaDataArgument(AccountRequest accountRequest, String attribute,
+				Object entAttr) throws GeneralException {
+			log.debug("Starting addExistingEntMetaDataArgument::");
+			
+			String strEntAttr = (String) entAttr;
+			log.debug("addExistingEntMetaDataArgument:: Attr:"+strEntAttr);		
+			Map mapFinalMgd = new HashMap();
+			List lsexisting = entAccountValue(accountRequest, strEntAttr);;
+			if (lsexisting != null) {
+				for (String entvalue : lsexisting) {
+					ManagedAttributeDetails entDetails = idn.getManagedAttributeDetails(application.getId(), strEntAttr, entvalue, Type.Entitlement);
+					Map entAttrs = entDetails != null ? entDetails.getAttributes() : null;
+					mapFinalMgd.put(entvalue, entAttrs);
+			}	
+			log.debug("addExistingEntMetaDataArgument:: Entilement attribute:"+mapFinalMgd);	
+			addMetaDataArgument(accountRequest, attribute, mapFinalMgd);
+			log.debug("Exit addExistingEntMetaDataArgument::");
+		}
+}
+
+	public void addEntMetaDataArgumentDuplicate(AccountRequest accountRequest, String attribute,
+			Object value, String attrOp) throws GeneralException {
+		log.debug("Starting addEntMetaDataArgumentDuplicate::");
+		String strEntAttr = (String) value;
+		log.debug("addEntMetaDataArgumentDuplicate:: Attr:" + strEntAttr);
+		Map mapFinalMgd = new HashMap();
+		List entAttrReqs = accountRequest.getAttributeRequests(strEntAttr);
+		if (entAttrReqs != null) {
+			for (AttributeRequest entAttrReq : entAttrReqs) {
+				boolean doCompare = false;
+				if ("Add".equals(attrOp) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Add) {
+					log.debug("Looking at an Add and operation in action is Add");
+					doCompare = true;
+				} else if ("Remove".equals(attrOp) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Remove) {
+					log.debug("Looking at an Remove and operation in action is Remove");
+					doCompare = true;
+				} else if ("Set".equals(attrOp) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Set) {
+					log.debug("Looking at an Set and operation in action is Set");
+					doCompare = true;
+				}
+					List valuesUpdated = asList(entAttrReq.getValue());
+					if (valuesUpdated != null) {
+						for (String entvalue : valuesUpdated) {
+							ManagedAttributeDetails entDetails = idn.getManagedAttributeDetails(application.getId(), strEntAttr, entvalue, Type.Entitlement);
+							Map entAttrs = entDetails != null ? entDetails.getAttributes() : null;
+						if (doCompare) {
+							mapFinalMgd.put(attribute+"::"+entvalue, entAttrs);
+						} else {
+							mapFinalMgd.put(attribute+"::"+entvalue, entAttrs);
+						}
+					}	
+			}
+		}
+		log.debug("addEntMetaDataArgumentDuplicate:: Entilement attribute:"+mapFinalMgd);	
+		addMetaDataArgument(accountRequest, attribute, mapFinalMgd);
+		log.debug("Exit addEntMetaDataArgumentDuplicate::");
+	}
+}
+
+public void addExistingEntMetaDataArgumentDuplicate(AccountRequest accountRequest, String attribute,
+				Object entAttr) throws GeneralException {
+			log.debug("Starting addExistingEntMetaDataArgumentDuplicate::");
+			
+			String strEntAttr = (String) entAttr;
+			log.debug("addExistingEntMetaDataArgumentDuplicate:: Attr:"+strEntAttr);		
+			Map mapFinalMgd = new HashMap();
+			List lsexisting = entAccountValue(accountRequest, strEntAttr);;
+			if (lsexisting != null) {
+				for (String entvalue : lsexisting) {
+					ManagedAttributeDetails entDetails = idn.getManagedAttributeDetails(application.getId(), strEntAttr, entvalue, Type.Entitlement);
+					Map entAttrs = entDetails != null ? entDetails.getAttributes() : null;
+					mapFinalMgd.put(attribute+"::"+entvalue, entAttrs);
+			}	
+			log.debug("addExistingEntMetaDataArgumentDuplicate:: Entilement attribute:"+mapFinalMgd);	
+			addMetaDataArgument(accountRequest, attribute, mapFinalMgd);
+			log.debug("Exit addExistingEntMetaDataArgumentDuplicate::");
+		}
+}
+	
+	public void throwError(Identity identity, AccountRequest accountRequest, String attribute, Object value) throws GeneralException {
+		log.debug("Enter throwError: " + value);
+		if(value instanceof String)
+			throw new GeneralException((String) value);
+		else {
+			throw new GeneralException("Unspecified Exception");
+		}
+	}
+	
+	/*
+	 * Helper Matching Methods
+	 */
+	 
+	/*
+	 * This is the main matching method. It will check the operation of the account request first.
+	 * Operation is the only required check. If there are not triggers, then every request of that operation matches.
+	 * if the operation matches, it will then check to see if everything of the following matches. These are all AND matches 
+	 * 		Identity Attribute Triggers: Validating against the identity
+	 * 		Account Attribute Update Triggers: Validating against updates in the account request
+	 * 		Account Attribute Current Triggers: Validating against current values in the account request
+	 * 		Entitlement Update Triggers: Similar to Account Attribute Update Triggers, but checking multivalued attributes Add or Remove
+	 * 		Entitlement Name Update Triggers: Similar to Entitlement Update Triggers, but the entitlement's name is checked instead of value.
+	 * 		
+	 */
+	public boolean isAccountRequestMatch(Identity identity, AccountRequest accountRequest, Map event) {
+		log.debug("Enter isAccountRequestMatch: " + accountRequest + " on event " + event);
+		String opCheck = (String) event.get("Operation");
+		if(accountRequest.getOperation().toString().equals(opCheck)) {
+			log.debug("Account Request matches op of event: " + opCheck);
+
+			log.debug("Check for Identity Attribute Triggers");
+			List idAttrTriggers = (List) event.get("Identity Attribute Triggers");
+			if(idAttrTriggers != null && !idAttrTriggers.isEmpty()) {
+				for(Map trigger: idAttrTriggers) {
+					if(isIdentityAttributeConfigMatch(identity, trigger)) {
+						log.debug("Identity " + identity + " matches " + trigger);
+					}
+					else {
+						log.debug("Identity " + identity + " doesn't match " + trigger);
+						return false;
+					}
+				}
+			}
+
+			log.debug("Checking for Account Attribute Update Triggers");
+			List acctAttrUpdateTriggers = (List) event.get("Account Attribute Update Triggers");
+			if(acctAttrUpdateTriggers != null && !acctAttrUpdateTriggers.isEmpty()) {
+				for(Map trigger: acctAttrUpdateTriggers) {
+					if(isAccountAttributeUpdateConfigMatch(accountRequest, trigger)) {
+						log.debug("Request matches " + trigger);
+					}
+					else {
+						log.debug("Request doesn't match " + trigger);
+						return false;
+					}
+				}
+			}
+
+			log.debug("Checking for Account Attribute Current Triggers");
+			List acctAttrCurrentTriggers = (List) event.get("Account Attribute Current Triggers");
+			log.debug("Account Attribute Current Triggers: " + acctAttrCurrentTriggers);
+			if(acctAttrCurrentTriggers != null && !acctAttrCurrentTriggers.isEmpty()) {
+				for(Map trigger: acctAttrCurrentTriggers) {
+					if(isAccountAttributeCurrentConfigMatch(identity, accountRequest, trigger)) {
+						log.debug("Request matches " + trigger);
+					}
+					else {
+						log.debug("Request doesn't match " + trigger);
+						return false;
+					}
+				}
+			}
+
+			log.debug("Check for Entitlement Update Triggers");
+			List entUpdateTriggers = (List) event.get("Entitlement Update Triggers");
+			if(entUpdateTriggers != null && !entUpdateTriggers.isEmpty()) {
+				for(Map trigger: entUpdateTriggers) {
+					if(isEntitlementUpdateConfigMatch(accountRequest, trigger)) {
+						log.debug("Request matches " + trigger);
+					}
+					else {
+						log.debug("Request doesn't match " + trigger);
+						return false;
+					}
+				}
+			}
+
+			log.debug("Check for Entitlement Name Update Triggers");
+			List entNameUpdateTriggers = (List) event.get("Entitlement Name Update Triggers");
+			if(entNameUpdateTriggers != null && !entNameUpdateTriggers.isEmpty()) {
+				for(Map trigger: entNameUpdateTriggers) {
+					if(isEntitlementNameUpdateConfigMatch(accountRequest, trigger)) {
+						log.debug("Request matches " + trigger);
+					}
+					else {
+						log.debug("Request doesn't match " + trigger);
+						return false;
+					}
+				}
+			}
+
+			log.debug("Check for Entitlement Cardinality Update Triggers");
+			List cardinalityChangeTriggers = (List) event.get("Entitlement Cardinality Update Triggers");
+			if(cardinalityChangeTriggers != null && !cardinalityChangeTriggers.isEmpty()) {
+				for(Map trigger: cardinalityChangeTriggers) {
+					if(isCardinalityMatch(accountRequest, trigger)) {
+						log.debug("Request matches " + trigger);
+					}
+					else {
+						log.debug("Request doesn't match " + trigger);
+						return false;
+					}
+				}
+			}
+
+			log.debug("Check for Current Account Status Trigger");
+			String accountStatusCheck = (String) event.get("Current Account Status Trigger");
+			if(accountStatusCheck != null && !accountStatusCheck.equals("")) {
+				if(isAccountStatusMatch(accountRequest, accountStatusCheck)) {
+					log.debug("Request existing account status matches " + accountStatusCheck);
+				}
+				else {
+					log.debug("Request existing account status doesn't match " + accountStatusCheck);
+					return false;
+				}
+			}
+		}
+		else {
+			log.debug("AccountRequest " + accountRequest + " doesn't match operation check: " + opCheck);
+			return false;
+		}
+		return true;
+	}
+	public boolean isAccountAttributeUpdateConfigMatch(AccountRequest accountRequest, Map trigger) {
+		if(trigger == null) {
+			log.error("Error isAccountAttributeUpdateConfigMatch Configuration: trigger is null");
+			return false;
+		}
+		String attr = (String) trigger.get("Attribute");
+		String op = (String) trigger.get("Operation");
+		String val = (String) trigger.get("Value");
+		if(attr == null) {
+			log.error("Error Configuration: attribute is null");
+			return false;
+		}
+		if(!"eq".equals(op) && !"ne".equals(op)) {
+			log.error("Error Configuration: operation is invalid: " + op);
+			return false;
+		}
+		List attrReqs = accountRequest.getAttributeRequests();
+		if(attrReqs != null) {
+			for(AttributeRequest attrReq: attrReqs) {
+				if(attr.equals(attrReq.getName())) {
+					Object attrVal = attrReq.getValue();
+					boolean valsMatch = isValueMatch(attrVal, val);
+					if("eq".equals(op) && !valsMatch) {
+						log.debug("Check for eq did not match: " + attrVal + " vs " + val);
+						return false;
+					}
+					if("ne".equals(op) && valsMatch) {
+						log.debug("Check for ne matched: " + attrVal + " vs " + val);
+						return false;
+					}
+					log.debug("Found match for attribute change " + op + " " + val);
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	public boolean isAccountAttributeCurrentConfigMatch(Identity identity, AccountRequest accountRequest, Map trigger) {
+		log.debug("isAccountAttributeCurrentConfigMatch identity: " + identity + " accountRequest: " + accountRequest + " trigger: " + trigger);
+
+		if(trigger == null) {
+			log.error("Error isAccountAttributeCurrentConfigMatch Configuration: trigger is null");
+			return false;
+		}
+
+		String attr = (String) trigger.get("Attribute");
+		String op = (String) trigger.get("Operation");
+		String val = (String) trigger.get("Value");
+
+		if(attr == null) {
+			log.error("Error Configuration: attribute is null");
+			return false;
+		}
+
+		if(!"eq".equals(op) && !"ne".equals(op)) {
+			log.error("Error Configuration: operation is invalid: " + op);
+			return false;
+		}
+
+		if(attr == null) {
+			log.error("Error Configuration: attribute is null");
+			return false;
+		}
+
+		Account acct = getAccount(identity, accountRequest);
+		if(acct == null) {
+			log.debug("Account was null");
+			return false;
+		}
+
+		Map accountAttributes = acct.getAttributes();
+		if(accountAttributes == null) {
+			log.debug("accountAttributes was null");
+			return false;
+		}
+
+		String currentValue = accountAttributes.get(attr);
+		log.debug("currentValue is: " + currentValue);
+
+		boolean valsMatch = isValueMatch(currentValue, val);
+		if("eq".equals(op) && !valsMatch) {
+			log.debug("Check for eq did not match: " + currentValue + " vs " + val);
+			return false;
+		}
+		if("ne".equals(op) && valsMatch) {
+			log.debug("Check for ne matched: " + currentValue + " vs " + val);
+			return false;
+		}
+		return true;
+	}
+	public boolean isIdentityAttributeConfigMatch(Identity identity, Map trigger) {
+		log.debug("Enter isIdentityAttributeConfigMatch: " + identity + " " + trigger);
+		if(trigger == null) {
+			log.error("Error isIdentityAttributeConfigMatch Configuration: trigger is null");
+			return false;
+		}
+		String attr = (String) trigger.get("Attribute");
+		String op = (String) trigger.get("Operation");
+		String val = (String) trigger.get("Value");
+		if(attr == null) {
+			log.error("Error Configuration: attribute is null");
+			return false;
+		}
+		if(!"eq".equals(op) && !"ne".equals(op)) {
+			log.error("Error Configuration: operation is invalid: " + op);
+			return false;
+		}
+		log.debug("Replace value: " + val);
+		Object idVal = identity.getAttribute(attr);
+		boolean valsMatch = isValueMatch(idVal, val);
+		if("eq".equals(op) && !valsMatch) {
+			log.debug("Check for eq did not match: " + idVal + " vs " + val);
+			return false;
+		}
+		if("ne".equals(op) && valsMatch) {
+			log.debug("Check for ne matched: " + idVal + " vs " + val);
+			return false;
+		}
+		return true;
+	}
+	public boolean isEntitlementUpdateConfigMatch(AccountRequest accountRequest, Map trigger) {
+		log.debug("Enter isEntitlementUpdateConfigMatch: " + identity + " " + trigger);
+		if(trigger == null) {
+			log.error("Error isEntitlementUpdateConfigMatch Configuration: trigger is null");
+			return false;
+		}
+		String attr = (String) trigger.get("Attribute");
+		String op = (String) trigger.get("Operation");
+		String val = (String) trigger.get("Value");
+		if(attr == null) {
+			log.error("Error Configuration: attribute is null");
+			return false;
+		}
+		if(!"Add".equals(op) && !"Remove".equals(op) && !"Set".equals(op)) {
+			log.error("Error Configuration: operation is invalid: " + op);
+			return false;
+		}
+		log.debug("Check change in group: " + val);
+		boolean foundMatch = false;
+		List entAttrReqs = accountRequest.getAttributeRequests(attr);
+		if(entAttrReqs != null) {
+			for(AttributeRequest entAttrReq: entAttrReqs) {
+				boolean doCompare = false;
+				if("Add".equals(op) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Add) {
+					log.debug("Looking at an Add and operation in trigger is Add");
+					doCompare = true;
+				}
+				else if("Remove".equals(op) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Remove) {
+					log.debug("Looking at an Remove and operation in trigger is Remove");
+					doCompare = true;
+				}
+				else if("Set".equals(op) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Set) {
+					log.debug("Looking at an Set and operation in trigger is Set");
+					doCompare = true;
+				}
+				if(doCompare) {
+					List valuesUpdated = asList(entAttrReq.getValue());
+					if(valuesUpdated != null) {
+						for(String update: valuesUpdated){
+							if(isValueMatch(update, val)) {
+								foundMatch = true;
+							}
+						}
+					}
+				}
+			}
+		}
+		return foundMatch;
+	}
+
+	public boolean isCardinalityMatch(AccountRequest accountRequest, Map trigger) {
+		log.debug("Enter isCardinalityMatch: " + accountRequest + " " + trigger);
+		if(trigger == null) {
+			log.error("Error isCardinalityMatch Configuration: trigger is null");
+			return false;
+		}
+		String attr = (String) trigger.get("Attribute");
+		String op = (String) trigger.get("Operation");
+		
+
+		if(attr == null) {
+			log.error("Error Configuration: attribute is null");
+			return false;
+		}
+
+		if(op == null) {
+			log.error("Error Configuration: operation is null");
+			return false;
+		}
+		Identity identity = plan.getIdentity();
+		log.debug("Have Identity: " + identity);
+		Account acct = getAccount(identity, accountRequest);
+		log.debug("Have acct: " + acct);
+		if(acct == null) {
+			log.error("Error Configuration: account doesn't exist");
+			return false;
+		}
+		
+		String scenario = "";
+		if (op.toUpperCase().equals("LASTREMOVED")) {
+			scenario = "LASTREMOVED";
+		}
+		else if (op.toUpperCase().equals("FIRSTADDED")) {
+			scenario = "FIRSTADDED";
+		}
+		else {
+			//Currently, we only care if we are adding the first or removing the last.
+			//Therefore, only the configuration combinations above are valid.
+			//Theoretically this can be expanded to look at arbitrary
+			//cardinalities and comparators
+			log.error("Error Configuration: operation is invalid: " + op);
+			return false;
+		}
+
+		log.debug("Check change in group cardinality for attribute " + attr);
+		boolean foundMatch = false;
+		Map pendingChangeMap = new HashMap();
+		List entAttrReqs = accountRequest.getAttributeRequests(attr);
+		log.debug("Have entAttrReqs: " + entAttrReqs);
+		if(entAttrReqs != null && !entAttrReqs.isEmpty()) {
+			for(Object entAttrReqObj: entAttrReqs) {
+				AttributeRequest entAttrReq = (AttributeRequest) entAttrReqObj;
+				boolean collectForAnalysis = false;
+				if(entAttrReq.getOperation() == ProvisioningPlan.Operation.Add) {
+					log.debug("Looking at an Add and operation in trigger has cardinality 1");
+					collectForAnalysis = true;
+				}
+				else if(entAttrReq.getOperation() == ProvisioningPlan.Operation.Remove) {
+					log.debug("Looking at a Remove and operation in trigger has cardinality 0");
+					collectForAnalysis = true;
+				}
+				else {
+					//Currently, we are ignoring set commands because 
+					//in most instances this should not result in a 
+					//change in cardinality. However, this feature
+					//could be added to support potential
+					//corner cases or plans that have not been compiled
+					//against an accurate account model.
+					log.debug("Not an add or remove. Ignoring attribute request");
+					collectForAnalysis = false;
+				}
+				if(collectForAnalysis) {
+					List valuesUpdated = asList(entAttrReq.getValue());
+					List changesForOperation = (List) pendingChangeMap.get(entAttrReq.getOperation());
+					if (changesForOperation != null) {
+						changesForOperation.addAll(valuesUpdated);
+
+					}
+					else {
+						changesForOperation = new ArrayList();
+						changesForOperation.addAll(valuesUpdated);
+					}
+					pendingChangeMap.put(entAttrReq.getOperation(), changesForOperation);
+					log.debug("Updated map after request: " + pendingChangeMap);
+				}
+			}
+			List currentValues = asList(idn.getRawAccountAttribute(acct, attr));
+			log.debug("currentValues: " + currentValues);
+
+			int initialValuesSize = 0;
+			if (currentValues != null && currentValues.size() > 0) {
+				initialValuesSize = currentValues.size();
+			}
+			else {
+				currentValues = new ArrayList();
+			}
+			log.debug("initialValuesSize: " + initialValuesSize);
+			List valuesToAdd = (List) pendingChangeMap.get(ProvisioningPlan.Operation.Add);
+			if (valuesToAdd != null) {
+				currentValues.addAll(valuesToAdd);
+			}
+			List valuesToRemove = (List) pendingChangeMap.get(ProvisioningPlan.Operation.Remove);
+			if (valuesToRemove != null) {
+				currentValues.removeAll(valuesToRemove);
+			}
+			int targetValuesSize = currentValues.size();
+			log.debug("targetValuesSize: " + targetValuesSize);
+			if ("FIRSTADDED".equals(scenario) && initialValuesSize == 0 && targetValuesSize > 0) {
+				foundMatch = true;
+			}
+			else if ("LASTREMOVED".equals(scenario) && initialValuesSize > 0 && targetValuesSize == 0) {
+				foundMatch = true;
+			}
+		}
+		return foundMatch;
+	}
+
+	public boolean isAccountStatusMatch(AccountRequest accountRequest, String status) {
+		log.debug("Enter isAccountStatusMatch: " + accountRequest + " " + status);
+		if(status == null) {
+			log.error("Error Configuration: Status is null");
+			return false;
+		}
+
+		Identity identity = plan.getIdentity();
+		Account acct = getAccount(identity, accountRequest);
+
+		if (acct == null) {
+			//This is likely a create operation, so we can't match
+			log.debug("Exit isAccountStatusMatch: no account");
+			return false;
+		}
+		
+		if (status.toUpperCase().equals("ACTIVE")) {
+			log.debug("Exit isAccountStatusMatch: " + !acct.isDisabled());
+			return !acct.isDisabled();
+		}
+		else if (status.toUpperCase().equals("DISABLED")) {
+			log.debug("Exit isAccountStatusMatch: " + acct.isDisabled());
+			return acct.isDisabled();
+		}
+		else {
+			//Invalid Configuration
+			log.error("Error Configuration: Status is invalid: " + status);
+			return false;
+		}
+	}
+	public boolean isEntitlementNameUpdateConfigMatch(AccountRequest accountRequest, Map trigger) {
+		log.debug("Enter isEntitlementNameUpdateConfigMatch: " + identity + " " + trigger);
+		if(trigger == null) {
+			log.error("Error isEntitlementNameUpdateConfigMatch Configuration: trigger is null");
+			return false;
+		}
+		String attr = (String) trigger.get("Attribute");
+		String op = (String) trigger.get("Operation");
+		String val = (String) trigger.get("Value");
+		if(attr == null) {
+			log.error("Error Configuration: attribute is null");
+			return false;
+		}
+		if(!"Add".equals(op) && !"Remove".equals(op) && !"Set".equals(op)) {
+			log.error("Error Configuration: operation is invalid: " + op);
+			return false;
+		}
+		log.debug("Check change in group: " + val);
+		boolean foundMatch = false;
+		List entAttrReqs = accountRequest.getAttributeRequests(attr);
+		if(entAttrReqs != null) {
+			for(AttributeRequest entAttrReq: entAttrReqs) {
+				boolean doCompare = false;
+				if("Add".equals(op) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Add) {
+					log.debug("Looking at an Add and operation in trigger is Add");
+					doCompare = true;
+				}
+				else if("Remove".equals(op) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Remove) {
+					log.debug("Looking at an Remove and operation in trigger is Remove");
+					doCompare = true;
+				}
+				else if("Set".equals(op) && entAttrReq.getOperation() == ProvisioningPlan.Operation.Set) {
+					log.debug("Looking at an Set and operation in trigger is Set");
+					doCompare = true;
+				}
+				if(doCompare) {
+					List valuesUpdated = asList(entAttrReq.getValue());
+					if(valuesUpdated != null) {
+						for(String update: valuesUpdated){
+							String entitlementDisplayName = getEntitlementDisplayName(application.getId(), attr, update);
+							if(entitlementDisplayName != null && isValueMatch(entitlementDisplayName, val)) {
+								foundMatch = true;
+							}
+						}
+					}
+				}
+			}
+		}
+		return foundMatch;
+	}
+	/*
+	 * Helper Utility Methods
+	 */
+	 
+	/*
+	 * Is Value Match is used when determining a specific val1 (identity attribute, account attribute, request attribute) matches val2
+	 * If val2 contains wild cards "*" or "?", then we need to check the wild card match method
+	 */
+	public boolean isValueMatch(Object val1, String val2) {
+		log.debug("Enter isValueMatch: " + val1 + " " + val2);
+		if(val1 instanceof String) {
+			val1 = replaceNullValuesWithNull((String) val1);
+		}
+		if(val2 instanceof String) {
+			val2 = replaceNullValuesWithNull(val2);
+		}
+		if(val1 == null && val2 == null) {
+			log.debug("Exit isValueMatch: Both null");
+			return true;
+		}
+		if(val1 == null && val2 != null) {
+			log.debug("Exit isValueMatch: obj1 null, val2 not");
+			return false;
+		}
+		if(val1 != null && val2 == null) {
+			log.debug("Exit isValueMatch: obj1 not null, val2 null");
+			return false;
+		}
+		
+		if(val1 instanceof String) {
+			log.debug("val1 is string, comparing against val2");
+			if(val2.contains("?") || val2.contains("*")) {
+				log.debug("val2 contains wild cards. checking wild card match");
+				return wildCardMatch((String) val1, val2);
+			}
+			if(((String) val1).equals(val2)) {
+				log.debug("val1 matches val2");
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	// The function that checks if
+	// two given strings match. The first string
+	// may contain wild card characters "?" and "*"
+	public boolean wildCardMatch(String value, String pattern)
+	{
+		log.debug("Enter wildCardMatch: " + value + " against " + pattern);
+		// If we reach at the end of both strings,
+		// we are done
+		if (pattern.length() == 0 && value.length() == 0) {
+			log.debug("Exit wildCardMatch: each value is empty now");
+				return true;
+		}
+ 
+		// Make sure that the characters after '*'
+		// are present in second string.
+		// This function assumes that the first
+		// string will not contain two consecutive '*'
+		if (pattern.length() > 1 && pattern.charAt(0) == '*' &&
+				value.length() == 0) {
+			log.debug("Exit wildCardMatch: pattern contains additional characters but value is empty");
+			return false;
+		}
+ 
+		// If the first string contains '?',
+		// or current characters of both strings match
+		if ((pattern.length() > 1 && pattern.charAt(0) == '?') ||
+				(pattern.length() != 0 && value.length() != 0 &&
+						pattern.charAt(0) == value.charAt(0))) {
+			log.debug("Recurse wildCardMatch: first character of " + value + " matches first character of " + pattern);
+			return wildCardMatch(value.substring(1),
+						pattern.substring(1));
+		}
+		// If there is *, then there are two possibilities
+		// a - We consider current character of second string
+		// b - We ignore current character of second string.
+		if (pattern.length() > 0 && pattern.charAt(0) == '*') {
+			log.debug("Recurse wildCardMatch: first character of " + pattern + " is a wild card need to check rest of pattern AND rest of string against " + value);
+			return wildCardMatch(value, pattern.substring(1)) ||
+					wildCardMatch(value.substring(1), pattern);
+		}
+		log.debug("Exit wildCardMatch: value " + value + " does not match pattern " + pattern);
+		return false;
+	}
+	
+	public String replaceNullValuesWithNull(String val) {
+		if("#{null}".equals(val) || "".equals(val)){
+			return null;
+		}
+		return val;
+	}
+	public String replaceIdentityValue(Identity identity, AccountRequest accountRequest, String val) {
+		log.debug("Enter replaceIdentityValue: " + identity + ": " + val);
+		if("#{null}".equals(val) || val == null){
+			return null;
+		}
+		log.debug("Start with val: " + val);
+		if(val.contains("#{now}")) {
+			val = val.replace("#{now}", (new Date()).toString());
+		}
+		log.debug("Val after now replacement: " + val);
+		int nextReplaceCount = val.split("#\\{now\\.").length - 1;  // Adding '}' to allow for validator to ignore mismatched counts of braces
+		for (int i = 1; i <= nextReplaceCount && val.contains("#{now"); i++) { // Adding '}' to allow for validator to ignore mismatched counts of braces
+			log.debug("Val still has now ... has a format change: " + val);
+			String dateRegex = "(.*)(#\\{now\\.)([^\\}]*)(\\})(.*)";  // Adding '{' to allow for validator to ignore mismatched counts of braces
+			String dateFormat = val.replaceAll(dateRegex, "$3");
+			log.debug("Date Format: " + dateFormat);
+			if(dateFormat == null) {
+				dateFormat = "yyyy-MM-dd";
+			}
+			String formattedDate = "";
+			switch(dateFormat){
+			case "EPOCH_TIME_WIN32":
+				Long win32TimeStamp = ((new Date()).getTime()+ 11644473600000L) * 10000L ;
+				formattedDate = "" + win32TimeStamp;
+				break;
+			case "EPOCH_TIME_JAVA":
+				formattedDate = "" + (new Date()).getTime();
+				break;
+			case "EPOCH_TIME":
+				formattedDate = "" + ((new Date()).getTime() / 1000);
+				break;
+			default: 
+				SimpleDateFormat sdf = null;
+				log.debug("Use SimpleDateFormat for " + dateFormat);
+				if("ISO8601".equals(dateFormat)) {
+					sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSX");
+			}
+			else {
+					sdf = new SimpleDateFormat(dateFormat);
+				}
+				formattedDate = sdf.format(new Date());
+			}
+			log.debug("replace #{now." + dateFormat+ "} with " + formattedDate);
+			val = val.replace("#{now." + dateFormat+ "}", formattedDate);
+			
+			log.debug("Val replaced with date formated change: " + val);
+		}
+		nextReplaceCount = val.split("#\\{identity\\.").length - 1;  // Adding '}' to allow for validator to ignore mismatched counts of braces
+		for (int i = 1; i <= nextReplaceCount && val.contains("#{identity"); i++) {  // Adding '}' to allow for validator to ignore mismatched counts of braces
+			String attributeRegex = "(.*)(#\\{identity\\.)([^\\}]*)(\\})(.*)";  // Adding '{' to allow for validator to ignore mismatched counts of braces
+			String attributeName = val.replaceAll(attributeRegex, "$3");
+			log.debug("Identity attribute to grab: " + attributeName);
+			String identityVal = null; 
+			if(identity == null) {
+				log.warn("No Identity");
+			}
+			else {
+				identityVal = (String) identity.getAttribute(attributeName);
+			}
+				if(identityVal == null) {
+					identityVal = "";
+				}
+			val = val.replace("#{identity." + attributeName + "}", identityVal);
+				log.debug("Val replaced with attribute: " + val);
+			}
+		nextReplaceCount = val.split("#\\{manager\\.").length - 1;  // Adding '}' to allow for validator to ignore mismatched counts of braces
+		for (int i = 1; i <= nextReplaceCount && val.contains("#{manager"); i++) {  // Adding '}' to allow for validator to ignore mismatched counts of braces
+			String attributeRegex = "(.*)(#\\{manager\\.)([^\\}]*)(\\})(.*)";  // Adding '{' to allow for validator to ignore mismatched counts of braces 
+			String attributeName = val.replaceAll(attributeRegex, "$3");
+			log.debug("Manager attribute to grab: " + attributeName);
+			String identityVal = null; 
+			if(identity == null || identity.getManager() == null) {
+				log.warn("No Manager");
+			}
+			else {
+				identityVal = (String) identity.getManager().getAttribute(attributeName);
+			}
+			if(identityVal == null) {
+				identityVal = "";
+		}
+			val = val.replace("#{manager." + attributeName + "}", identityVal);
+			log.debug("Val replaced with attribute: " + val);
+		}
+		nextReplaceCount = val.split("#\\{account\\.").length - 1;  // Adding '}' to allow for validator to ignore mismatched counts of braces
+		for (int i = 1; i <= nextReplaceCount && val.contains("#{account"); i++) {  // Adding '}' to allow for validator to ignore mismatched counts of braces
+			String attributeRegex = "(.*)(#\\{account\\.)([^\\}]*)(\\})(.*)";  // Adding '{' to allow for validator to ignore mismatched counts of braces
+			String attributeName = val.replaceAll(attributeRegex, "$3");
+			log.debug("Account attribute to grab: " + attributeName);
+			Account account = getAccount(identity, accountRequest);
+			log.debug("Got account");
+			String accountVal = "";
+			if(account != null) {
+				accountVal = idn.getAccountAttribute(account, attributeName);
+				log.debug("Got account attribute value: " + accountVal);
+			}
+			if(accountVal == null) {
+				accountVal = "";
+			}
+			val = val.replace("#{account." + attributeName + "}", accountVal);
+			log.debug("Val replaced with attribute: " + val);
+		}
+		log.debug("Exit replaceIdentityValue: " + val);
+		return val;
+	}
+
+
+	public List entAccountValue(AccountRequest accountRequest, String val) throws GeneralException {
+	log.debug("Enter entAccountValue:: " + val);
+		List lsExistingEnt = new ArrayList();	
+		if (val == null) {
+			return null;
+		}
+		log.debug("Start with val: " + val);
+			Account account = getAccount(identity, accountRequest);
+			log.debug("Got account");
+			if (account != null) {
+				lsExistingEnt = Util.filterNulls(Util.asList(idn.getRawAccountAttribute(account, val)));
+				log.debug("Got account attribute value: " + lsExistingEnt);
+			}
+			if (lsExistingEnt == null) {
+				lsExistingEnt = new ArrayList();
+			}
+		log.debug("Exit entAccountValue: " + lsExistingEnt);
+		return lsExistingEnt;
+	}
+
+
+	public List entAccountAttrValue(AccountRequest accountRequest, String val) throws GeneralException {
+		log.debug("Enter entAccountAttrValue:: " + val);
+		List lsExistingEnt = new ArrayList();
+		if ("#{null}".equals(val) || val == null) {
+			return null;
+		}
+		log.debug("Start with val: " + val);
+		int nextReplaceCount = val.split("#\\{account\\.").length - 1; // Adding '}' to allow for validator to ignore
+																		// mismatched counts of braces
+		for (int i = 1; i <= nextReplaceCount && val.contains("#{account"); i++) { // Adding '}' to allow for validator
+																					// to ignore mismatched counts of
+																					// braces
+			String attributeRegex = "(.*)(#\\{account\\.)([^\\}]*)(\\})(.*)"; // Adding '{' to allow for validator to
+																				// ignore mismatched counts of braces
+			String attributeName = val.replaceAll(attributeRegex, "$3");
+			log.debug("Account attribute to grab: " + attributeName);
+			Account account = getAccount(identity, accountRequest);
+			log.debug("Got account");
+			if (account != null) {
+				lsExistingEnt = Util.filterNulls(Util.asList(idn.getRawAccountAttribute(account, attributeName)));
+				log.debug("Got account attribute value: " + lsExistingEnt);
+			}
+			if (lsExistingEnt == null) {
+				lsExistingEnt = new ArrayList();
+			}
+		}
+		log.debug("Exit entAccountAttrValue: " + lsExistingEnt);
+		return lsExistingEnt;
+	}
+	
+	/*
+	 * Method takes an object and returns a list. If the object is already a list, it returns the object
+	 * Otherwise it'll return a list containing the object if not null
+	 */
+	public List asList(Object val){
+		if(val == null) {
+			return null;
+		}
+		List retList = null;
+		if(val instanceof List) {
+			retList = (List) val;
+		}
+		else if(val instanceof String) {
+			retList = new ArrayList();
+			retList.add((String) val);
+		}
+		return retList;
+	}
+	
+	public Account getAccount(Identity identity, AccountRequest accountRequest) {
+		String appName = accountRequest.getApplicationName();
+		String nativeId = accountRequest.getNativeIdentity();
+		Account account =  idn.getAccountByNativeIdentity(appName,nativeId);
+		return account;
+	}
+	
+	public String getEntitlementDisplayName(String id, String attr, String value) {
+		ManagedAttributeDetails entDetails = idn.getManagedAttributeDetails(id, attr, value, Type.Entitlement);
+		Map entAttrs = entDetails != null ? entDetails.getAttributes() : null;
+		return (entAttrs != null && entAttrs.containsKey("displayName")) ? (String) entAttrs.get("displayName") : null;
+	}
+	
+	/*
+		Main Running Code 
+	*/
+
+	log.debug("starting");
+	Attributes appAtts = application.getAttributes();
+	if(appAtts != null && appAtts.get("cloudServicesIDNSetup") != null) {
+		
+		Map idnSetup = (Map) appAtts.get("cloudServicesIDNSetup");
+		log.debug("In Before Provisioning Rule :::: idnSetup: " + idnSetup);
+		List eventConfigs = (List) idnSetup.get("eventConfigurations");
+		log.debug("In Before Provisioning Rule :::: eventConfigs: " + eventConfigs);
+		applyEventConfigurations(plan, eventConfigs);
+	}
+
+]]>
+
+  </Source>
+</Rule>
